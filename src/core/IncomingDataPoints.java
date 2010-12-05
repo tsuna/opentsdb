@@ -383,6 +383,17 @@ final class IncomingDataPoints implements WritableDataPoints {
     throw new ClassCastException("value #" + i + " is not a float in " + this);
   }
 
+  public long getHash() {
+    if (row == null) {
+      throw new IllegalStateException("setSeries never called before!");
+    }
+    long hash = 0;
+    for (int i = row.length - 1; i >= 0; i--) {
+      hash = 31 * hash + row[i];
+    }
+    return hash;
+  }
+
   /** Returns a human readable string representation of the object. */
   public String toString() {
     // The argument passed to StringBuilder is a pretty good estimate of the

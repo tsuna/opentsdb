@@ -320,6 +320,17 @@ final class RowSeq implements DataPoints {
     }
   }
 
+  public long getHash() {
+    if (key == null) {
+      throw new IllegalStateException("setRow never called before!");
+    }
+    long hash = 0;
+    for (int i = key.length - 1; i >= 0; i--) {
+      hash = 31 * hash + key[i];
+    }
+    return hash;
+  }
+
   /** Returns a human readable string representation of the object. */
   public String toString() {
     // The argument passed to StringBuilder is a pretty good estimate of the

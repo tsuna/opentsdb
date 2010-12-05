@@ -81,14 +81,14 @@ final class TsdbQuery implements Query {
   private ArrayList<byte[]> tags;
 
   /**
-   * Tags by which we must group the results.
+   * Tags by which we must group the results (can be {@code null}).
    * Each element is a tag ID.
    * Invariant: an element cannot be both in this array and in {@code tags}.
    */
   private ArrayList<byte[]> group_bys;
 
   /**
-   * Values we may be grouping on.
+   * Values we may be grouping on (can be {@code null}).
    * For certain elements in {@code group_bys}, we may have a specific list of
    * values IDs we're looking for.  Those IDs are stored in this map.  The key
    * is an element of {@code group_bys} (so a tag name ID) and the values are
@@ -220,6 +220,43 @@ final class TsdbQuery implements Query {
         }
       }
     }
+  }
+
+  private static long hashBytes(long hash, final byte[] array) {
+    for (final byte b : array) {
+      hash = hash * 31 + b;
+    }
+    return hash;
+  }
+
+  public long getHash() {
+    long hash = 0;
+    if (group_by_values != null) {
+      for (final Map.Entry<byte[], byte[][]> gv : group_by_values.entrySet()) {
+        hash = hashBytes(hash, gv.getKey());
+        for (final byte[] value : gv.getValue()) {
+          hash = hashBytes(hash, value);
+        }
+      }
+    }
+    if (group_bys != null) {
+      for (final byte[] tag : group_bys) {
+        hash = hashBytes(hash, tag);
+      }
+    }
+    for (final byte[] tag : tags) {
+      hash = hashBytes(hash, tag);
+    }
+    hash = hashBytes(hash, metric);
+    hash ^= start_time * 31L;
+    hash ^= end_time * 7L;
+    hash ^= rate ? 2325711 : 2970837;
+    hash ^= ((long) aggregator.hashCode()) << 32;
+    if (downsampler != null) {
+      hash ^= downsampler.hashCode() * 31L;
+      hash ^= ((long) sample_interval) << 26;
+    }
+    return hash;
   }
 
   public DataPoints[] run() throws HBaseException {

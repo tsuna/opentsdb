@@ -253,6 +253,21 @@ final class SpanGroup implements DataPoints {
     return getDataPoint(i).longValue();
   }
 
+  public long getHash() {
+    long hash = start_time * 31L
+      ^ end_time * 7L
+      ^ (((long) metricName().hashCode()) << 32)
+      ^ getTags().hashCode()
+      ^ (rate ? 2325711 : 2970837)
+      ^ getAggregatedTags().hashCode()
+      ^ (((long) aggregator.hashCode()) << 32);
+    if (downsampler != null) {
+      hash ^= downsampler.hashCode() * 31L;
+      hash ^= ((long) sample_interval) << 26;
+    }
+    return hash;
+  }
+
   /**
    * Iterator that does aggregation and linear interpolation (lerp).
    * <p>

@@ -139,4 +139,19 @@ public interface DataPoints extends Iterable<DataPoint> {
    */
   double doubleValue(int i);
 
+  /**
+   * Returns a 64 bit hash code that identifies this series of data points.
+   * <p>
+   * The hash is <b>NOT</b> computed from the data points inside this
+   * instance, but rather from any of the parameters that uniquely identifies
+   * this sequence (such as the metric name, tags, start and end times, etc.
+   * -- depends on the implementation).  So this hash is always quickly
+   * computed in {@code O(1)}.
+   * <p>
+   * At this time, this method makes no guarantee on the strength of the hash
+   * or collision probability, although in practice collision "should be rare".
+   * @return A 64-bit hash.
+   */
+  long getHash();
+
 }

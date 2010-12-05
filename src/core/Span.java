@@ -199,6 +199,18 @@ final class Span implements DataPoints {
     return rows.get(idx).doubleValue(offset);
   }
 
+  public long getHash() {
+    final int size = rows.size();
+    switch (size) {
+      case 0:
+        throw new IllegalStateException("addRow never called before!");
+      case 1:
+        return rows.get(0).getHash();
+      default:
+        return rows.get(0).getHash() ^ rows.get(size - 1).getHash();
+    }
+  }
+
   /** Returns a human readable string representation of the object. */
   public String toString() {
     final StringBuilder buf = new StringBuilder();

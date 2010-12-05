@@ -93,6 +93,11 @@ public interface Query {
   void downsample(int interval, Aggregator downsampler);
 
   /**
+   * Returns a 64-bit hash of all the parameters of this query.
+   */
+  long getHash();
+
+  /**
    * Runs this query.
    * @return The data points matched by this query.
    * <p>
