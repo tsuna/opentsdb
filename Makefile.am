@@ -47,6 +47,7 @@ tsdb_SRC := \
 	src/core/Tags.java	\
 	src/core/TsdbQuery.java	\
 	src/core/WritableDataPoints.java	\
+	src/graph/GnuplotDataPoints.java	\
 	src/graph/Plot.java	\
 	src/stats/Histogram.java	\
 	src/stats/StatsCollector.java	\

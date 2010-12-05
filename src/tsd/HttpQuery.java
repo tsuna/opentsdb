@@ -444,11 +444,13 @@ final class HttpQuery {
       buf = null;
       plot.setParams(params);
       params = null;
-      final String basepath =
-        RpcHandler.getDirectoryFromSystemProp("tsd.http.cachedir")
-        + Integer.toHexString(msg.hashCode());
-      GraphHandler.runGnuplot(this, basepath, plot);
+      final String cachedir =
+        RpcHandler.getDirectoryFromSystemProp("tsd.http.cachedir");
+      final long hash = msg.hashCode() * 401L;
+      final String basepath = Plot.getAndMkDirHashedPath(cachedir, hash);
+      plot.dumpToFiles(cachedir, basepath);
       plot = null;
+      GraphHandler.runGnuplot(this, cachedir, basepath);
       sendFile(status, basepath + ".png", max_age);
     } catch (Exception e) {
       getQueryString().remove("png");  // Avoid recursion.

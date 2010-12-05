@@ -254,9 +254,13 @@ final class SpanGroup implements DataPoints {
   }
 
   public long getHash() {
-    long hash = start_time * 31L
-      ^ end_time * 7L
-      ^ (((long) metricName().hashCode()) << 32)
+    // XXX HACK XXX
+    // XXX We exclude the start_time and end_time from the hash in order
+    // XXX to prevent creating shitloads of .dat files because of relative
+    // XXX time specifications...  See also tsd.GraphHandler.customHash
+    long hash = //start_time * 31L
+      //^ end_time * 7L
+      /*^*/ (((long) metricName().hashCode()) << 32)
       ^ getTags().hashCode()
       ^ (rate ? 2325711 : 2970837)
       ^ getAggregatedTags().hashCode()
@@ -265,6 +269,10 @@ final class SpanGroup implements DataPoints {
       hash ^= downsampler.hashCode() * 31L;
       hash ^= ((long) sample_interval) << 26;
     }
+    // TODO(tsuna): The hashing above isn't very good and leads to many common
+    // prefixes.  So in the mean time simply reverse the bytes (we don't care
+    // so much about common suffixes, the prefix matters for the directories).
+    hash = Long.reverseBytes(hash);
     return hash;
   }
 

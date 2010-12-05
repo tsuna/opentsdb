@@ -12,6 +12,7 @@
 // see <http://www.gnu.org/licenses/>.
 package net.opentsdb.graph;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -21,6 +22,7 @@ import java.util.TimeZone;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import net.opentsdb.core.Const;
 import net.opentsdb.core.DataPoint;
 import net.opentsdb.core.DataPoints;
 
@@ -47,8 +49,14 @@ public final class Plot {
   private final int end_time;
 
   /** All the DataPoints we want to plot. */
-  private ArrayList<DataPoints> datapoints =
-    new ArrayList<DataPoints>();
+  private ArrayList<DataPoints> datapoints = new ArrayList<DataPoints>();
+
+  /**
+   * User-provided hashes for each series of data points.
+   * We use them to generate consistent file names to store the data points.
+   * Invariant: {@code datapoints.size() == cachekeys.size()}.
+   */
+  private ArrayList<Long> cachekeys = new ArrayList<Long>();
 
   /** Per-DataPoints Gnuplot options. */
   private ArrayList<String> options = new ArrayList<String>();
@@ -147,10 +155,17 @@ public final class Plot {
 
   /**
    * Adds some data points to this plot.
-   * @param datapoints The data points to plot.
+   * @param datapoints The data points to plot.  If {@code null}, the code
+   * will use the {@code cachekey} argument to derive the name of the file
+   * to re-use for this plot.
+   * @param cachekey A custom key or 64-bit hash that will be used to
+   * create the file names of the data files.  This can be used to implement
+   * an on-disk cache where you can avoid pulling the same data twice out of
+   * HBase by checking the existence of some already known file paths.
    * @param options The options to apply to this specific series.
    */
   public void add(final DataPoints datapoints,
+                  final long cachekey,
                   final String options) {
     // Technically, we could check the number of data points in the
     // datapoints argument in order to do something when there are none, but
@@ -159,35 +174,79 @@ public final class Plot {
     // when we're trying to use the data, in order to avoid multiple passes
     // through the entire data.
     this.datapoints.add(datapoints);
+    this.cachekeys.add(cachekey);
     this.options.add(options);
   }
 
   /**
    * Returns a view on the datapoints in this plot.
    * Do not attempt to modify the return value.
+   * @param basepath The base path to use for data files.  A number of new
+   * files will be created and their names will all start with this string.
+   * @throws IOException if there was an error while reading a cached file.
+   * @throws FileNotFoundException if a cached file didn't exist unexpectedly.
+   * @throws IllegalArgumentException if a cached file contains malformed data.
    */
-  public Iterable<DataPoints> getDataPoints() {
-    return datapoints;
+  public Iterable<DataPoints> getDataPoints(final String basepath)
+    throws IOException {
+    boolean nocachehit = true;
+    for (final DataPoints dp : datapoints) {
+      nocachehit &= dp != null;
+    }
+    if (nocachehit) {
+      return datapoints;
+    }
+    final int size = datapoints.size();
+    final ArrayList<DataPoints> dps = new ArrayList<DataPoints>(size);
+    for (int i = 0; i < size; i++) {
+      DataPoints dp = datapoints.get(i);
+      if (dp != null) {
+        dps.add(dp);
+        continue;
+      }
+      dp = null;
+      final String datafile = getAndMkDirHashedPath(basepath, cachekeys.get(i),
+                                                    ".dat");
+      dps.add(GnuplotDataPoints.fromFile(datafile, utc_offset));
+    }
+    return dps;
   }
 
   /**
    * Generates the Gnuplot script and data files.
-   * @param basepath The base path to use.  A number of new files will be
-   * created and their names will all start with this string.
+   * @param basepath The base path to use for data files.  A number of new
+   * files will be created and their names will all start with this string.
+   * @param scriptpath The base name of the path to use for the Gnuplot script.
    * @return The number of data points sent to Gnuplot.  This can be less
    * than the number of data points involved in the query due to things like
    * aggregation or downsampling.
    * @throws IOException if there was an error while writing one of the files.
+   * @throws IOException if there was an error while checking the existence of
+   * a cached file.
    */
-  public int dumpToFiles(final String basepath) throws IOException {
+  public int dumpToFiles(final String basepath,
+                         final String scriptpath) throws IOException {
     int npoints = 0;
     final int nseries = datapoints.size();
-    final String datafiles[] = nseries > 0 ? new String[nseries] : null;
+    final String[] datafiles = nseries > 0 ? new String[nseries] : null;
+    String[] cached_titles = null;
     for (int i = 0; i < nseries; i++) {
-      datafiles[i] = basepath + "_" + i + ".dat";
+      final DataPoints dp = datapoints.get(i);
+      datafiles[i] = getAndMkDirHashedPath(basepath, cachekeys.get(i),
+                                           ".dat");
+      if (dp == null) {
+        if (cached_titles == null) {
+          cached_titles = new String[datapoints.size()];
+        }
+        npoints += GnuplotDataPoints.loadTitleAndCount(datafiles[i],
+                                                       cached_titles, i);
+        continue;  // The file already exists (cache hit).
+      }
+
       final PrintWriter datafile = new PrintWriter(datafiles[i]);
       try {
-        for (final DataPoint d : datapoints.get(i)) {
+        printHeader(datafile, dp);
+        for (final DataPoint d : dp) {
           final long ts = d.timestamp();
           if (ts >= (start_time & UNSIGNED) && ts <= (end_time & UNSIGNED)) {
             npoints++;
@@ -218,8 +277,117 @@ public final class Plot {
       // user.  Let's make sure it defines a min and a max.
       params.put("yrange", "[0:10]");  // Doesn't matter what values we use.
     }
-    writeGnuplotScript(basepath, datafiles);
+    writeGnuplotScript(scriptpath, datafiles, cached_titles);
     return npoints;
+  }
+
+  /**
+   * Prints the "header" to the given data file, for the given data points.
+   * <p>
+   * The "header" is a comment line that will be ignored by Gnuplot.  We use
+   * it to save some meta data about the data points (e.g. metric name and
+   * tags) so that we can reload this meta data later when we reload the data
+   * points.
+   * @param datafile The file to write to.
+   * @param dp The data points to write to the file.
+   */
+  private static void printHeader(final PrintWriter datafile,
+                                  final DataPoints dp) {
+    // First pre-compute the size of the buffer we need.
+    final Map<String, String> tags = dp.getTags();
+    int size = 2 + 1 + 1 + 1;  // "# " and "{" and "}" and "\n".
+    for (final Map.Entry<String, String> tag : tags.entrySet()) {
+      size += tag.getKey().length() + tag.getValue().length();
+    }
+    // 1 x "=" between each key/value + 1 x "," between each tag.
+    size += 2 * tags.size() - 1;
+    final String metric = dp.metricName();
+    size += metric.length();
+    final StringBuilder buf = new StringBuilder(size);
+
+    buf.append("# ").append(metric);
+    if (!tags.isEmpty()) {
+      buf.append('{');
+      for (final Map.Entry<String, String> tag : tags.entrySet()) {
+        buf.append(tag.getKey()).append('=').append(tag.getValue()).append(',');
+      }
+      buf.setCharAt(buf.length() - 1, '}');  // Replace the last ',' with '}'.
+    }
+    buf.append('\n');
+    datafile.print(buf);
+  }
+
+  /**
+   * Given a base path and a hash, creates the necessary directories and path.
+   * <p>
+   * Equivalent to {@link getAndMkDirHashedPath(String, long, String)
+   * getAndMkDirHashedPath}{@code (basepath, hash, "")}.
+   * @param basepath The {@code /}-terminated path to the directory under
+   * which the hashed path will be stored.
+   * @param hash The hash of the hashed path.
+   * @return The hashed path (the file itself doesn't get created).
+   */
+  public static String getAndMkDirHashedPath(final String basepath,
+                                             final long hash) {
+    return getAndMkDirHashedPath(basepath, hash, "");
+  }
+
+  /**
+   * Given a base path and a hash, creates the necessary directories and path.
+   * <p>
+   * For example, if {@code basepath = "/foo/"} and
+   * {@code hash = 0x1234567890abcdef}, then this function will create the
+   * directories {@code /foo/12} and {@code /foo/12/34} if they don't already
+   * exist, and will return {@code "/foo/12/34/567890abcdef"}.  Any directory
+   * that cannot be created only causes an error to be logged, the function
+   * will not bail out or otherwise report the error.  An exception will be
+   * thrown when the application attempts to create the file using the path
+   * returned by this function.
+   * @param basepath The {@code /}-terminated path to the directory under
+   * which the hashed path will be stored.
+   * @param hash The hash of the hashed path.
+   * @param extension The extension to append at the end of the path.
+   * @return The hashed path (the file itself doesn't get created).
+   */
+  public static String getAndMkDirHashedPath(final String basepath,
+                                             final long hash,
+                                             final String extension) {
+    // 16 bytes for the 64-bit hex, 2 bytes for both `/'.
+    final StringBuilder buf = new StringBuilder(basepath.length() + 16 + 2
+                                                + extension.length());
+    buf.append(basepath);
+    appendHexByte(buf, (byte) ((hash & 0xFF00000000000000L) >> 56));
+    mkdir(buf.toString());
+    buf.append('/');
+    appendHexByte(buf, (byte) ((hash & 0x00FF000000000000L) >> 48));
+    mkdir(buf.toString());
+    buf.append('/');
+    long mask = 0x0000FF0000000000L;
+    for (byte i = 5; i >= 0; i--) {
+      appendHexByte(buf, (byte) ((hash & mask) >> (i * 8)));
+      mask >>= 8;
+    }
+    buf.append(extension);
+    return buf.toString();
+  }
+
+  /**
+   * Creates the directory given in argument if it doesn't already exist.
+   * @param path The path of the directory to create.
+   */
+  private static void mkdir(final String path) {
+    final File dir = new File(path);
+    if (!dir.exists() && !dir.mkdir()) {
+      if (!dir.exists()) {  // Double check in case of a race.
+        LOG.error("Couldn't mkdir " + dir);
+      }
+    }
+  }
+
+  /** Appends into buf the given byte in hexadecimal in ASCII.  */
+  private static void appendHexByte(final StringBuilder buf, final byte b) {
+    buf.append((char) Const.HEX[(b >>> 4) & 0x0F])
+      .append((char) Const.HEX[b & 0x0F]);
   }
 
   /**
@@ -229,9 +397,12 @@ public final class Plot {
    * in the order in which they ought to be plotted.  It is assumed that
    * the ith file will correspond to the ith entry in {@code datapoints}.
    * Can be {@code null} if there's no data to plot.
+   * @param cached_titles The cache titles of the time series, if any,
+   * otherwise {@code null}.
    */
   private void writeGnuplotScript(final String basepath,
-                                  final String[] datafiles) throws IOException {
+                                  final String[] datafiles,
+                                  final String[] cached_titles) throws IOException {
     final String script_path = basepath + ".gnuplot";
     final PrintWriter gp = new PrintWriter(script_path);
     try {
@@ -310,7 +481,8 @@ public final class Plot {
       gp.write("plot ");
       for (int i = 0; i < nseries; i++) {
         final DataPoints dp = datapoints.get(i);
-        final String title = dp.metricName() + dp.getTags();
+        final String title = (dp != null ? dp.metricName() + dp.getTags()
+                              : cached_titles[i]);
         gp.append(" \"").append(datafiles[i]).append("\" using 1:2");
         if (smooth != null) {
           gp.append(" smooth ").append(smooth);

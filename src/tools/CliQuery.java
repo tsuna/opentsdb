@@ -122,7 +122,7 @@ final class CliQuery {
 
     if (plot != null) {
       try {
-        final int npoints = plot.dumpToFiles(basepath);
+        final int npoints = plot.dumpToFiles(basepath, "graph");
         LOG.info("Wrote " + npoints + " for Gnuplot");
       } catch (IOException e) {
         LOG.error("Failed to write the Gnuplot file under " + basepath, e);
@@ -154,7 +154,9 @@ final class CliQuery {
       final StringBuilder buf = want_plot ? null : new StringBuilder();
       for (final DataPoints datapoints : queries.get(i).run()) {
         if (want_plot) {
-          plot.add(datapoints, plotoptions.get(i));
+          final long useless_cachekey = (((long) datapoints.hashCode()) << 32)
+            | plot.hashCode();
+          plot.add(datapoints, useless_cachekey, plotoptions.get(i));
         } else {
           final String metric = datapoints.metricName();
           final String tagz = datapoints.getTags().toString();

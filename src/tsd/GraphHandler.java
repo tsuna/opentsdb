@@ -38,6 +38,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.hbase.async.Bytes;
+
 import net.opentsdb.core.Aggregator;
 import net.opentsdb.core.Aggregators;
 import net.opentsdb.core.Const;
@@ -64,6 +66,12 @@ final class GraphHandler implements HttpRpc {
     = new AtomicInteger();
   /** Number of times a graph request was served from disk, no work needed. */
   private static final AtomicInteger graphs_diskcache_hit
+    = new AtomicInteger();
+  /** Number of times a TSDB queries served from the disk cache.  */
+  private static final AtomicInteger query_diskcache_hit
+    = new AtomicInteger();
+  /** Number of times a TSDB queries not served from the disk cache.  */
+  private static final AtomicInteger query_diskcache_miss
     = new AtomicInteger();
 
   /** Keep track of the latency of graphing requests. */
@@ -127,7 +135,7 @@ final class GraphHandler implements HttpRpc {
 
   private void doGraph(final TSDB tsdb, final HttpQuery query)
     throws IOException {
-    final String basepath = getGnuplotBasePath(query);
+    final String basepath = getGnuplotBasePath(cachedir, query);
     final long start_time = getQueryStringDate(query, "start");
     final boolean nocache = query.hasQueryStringParam("nocache");
     if (start_time == -1) {
@@ -174,18 +182,15 @@ final class GraphHandler implements HttpRpc {
     final int nqueries = tsdbqueries.length;
     @SuppressWarnings("unchecked")
     final HashSet<String>[] aggregated_tags = new HashSet[nqueries];
+    // Maps the path of a ".map" file to its new contents.
+    final HashMap<String, byte[]> maps = new HashMap<String, byte[]>();
     int npoints = 0;
     for (int i = 0; i < nqueries; i++) {
       try {  // execute the TSDB query!
-        // XXX This is slow and will block Netty.  TODO(tsuna): Don't block.
+        aggregated_tags[i] = new HashSet<String>();
         // TODO(tsuna): Optimization: run each query in parallel.
-        final DataPoints[] series = tsdbqueries[i].run();
-        for (final DataPoints datapoints : series) {
-          plot.add(datapoints, options.get(i));
-          aggregated_tags[i] = new HashSet<String>();
-          aggregated_tags[i].addAll(datapoints.getAggregatedTags());
-          npoints += datapoints.aggregatedSize();
-        }
+        npoints += runTsdbQuery(query, tsdbqueries[i], end_time, max_age, plot,
+                                options.get(i), maps, aggregated_tags[i]);
       } catch (RuntimeException e) {
         logInfo(query, "Query failed (stack trace coming): "
                 + tsdbqueries[i]);
@@ -195,14 +200,21 @@ final class GraphHandler implements HttpRpc {
     }
     tsdbqueries = null;  // free()
 
+    // First write all the ".dat" files.
+    final int nplotted = plot.dumpToFiles(cachedir, basepath);
+    // Then write all the ".map" files that store the mapping between the
+    // query hash and the hash of the responses.
+    for (final Map.Entry<String, byte[]> map : maps.entrySet()) {
+      writeFile(query, map.getKey(), map.getValue());
+    }
     if (query.hasQueryStringParam("ascii")) {
-      respondAsciiQuery(query, max_age, basepath, plot);
+      respondAsciiQuery(query, max_age, cachedir, basepath, plot);
       return;
     }
 
     try {
-      gnuplot.execute(new RunGnuplot(query, max_age, plot, basepath,
-                                     aggregated_tags, npoints));
+      gnuplot.execute(new RunGnuplot(query, max_age, nplotted, basepath,
+                                     cachedir, aggregated_tags, npoints));
     } catch (RejectedExecutionException e) {
       query.internalError(new Exception("Too many requests pending,"
                                         + " please try again later", e));
@@ -243,26 +255,183 @@ final class GraphHandler implements HttpRpc {
     }
   }
 
+  /**
+   * Returns the path to use for the query map cache file.
+   * @param query The query being handled (for logging purposes).
+   * @param tsdbquery The query to run.
+   * @param cachedir Directory where to cache query results.
+   */
+  private static String getQueryMapCachePath(final String cachedir,
+                                             final HttpQuery query,
+                                             final Query tsdbquery) {
+    long hash = tsdbquery.getHash();
+    // XXX HACK XXX
+    // XXX This is undoing part of the hash done by tsdbquery.getHash()
+    // XXX to prevent creating shitloads of .map files because of relative
+    // XXX time specifications...
+    hash ^= tsdbquery.getStartTime() * 31;
+    hash ^= tsdbquery.getEndTime() * 7;
+    // XXX END HACK XXX
+    hash ^= query.getQueryStringParam("start").hashCode() * 31L;
+    final String end = query.getQueryStringParam("end");
+    if (end != null) {
+      hash ^= end.hashCode() * 7L;
+    }
+    return Plot.getAndMkDirHashedPath(cachedir, hash, ".map");
+  }
+
+  /**
+   * XXX HACK Returns the custom hash to use for the given data points.
+   * @param query The query being handled (for logging purposes).
+   * @param dp The data points sequence to hash.
+   */
+  private static long customHash(final HttpQuery query, final DataPoints dp) {
+    long hash = dp.getHash();
+    hash ^= query.getQueryStringParam("start").hashCode() * 31L;
+    final String end = query.getQueryStringParam("end");
+    if (end != null) {
+      hash ^= end.hashCode() * 7L;
+    }
+    return hash;
+  }
+
+  /**
+   * Runs a TSDB query.
+   * <p>
+   * If we've already executed this query previously, we may find cached
+   * results in the {@code cachedir}, in which case there will be no
+   * interaction with HBase.  Otherwise we will query HBase to retrieve the
+   * data points and then store them in the {@code cachedir}.
+   * @param query The query being handled (for logging purposes).
+   * @param tsdbquery The query to run.
+   * @param end_time The end time on the query (32-bit unsigned int, seconds).
+   * @param max_age The maximum time (in seconds) we wanna allow clients to
+   * cache the result in case of a cache hit.
+   * @param plot The plot instance to which to add results.
+   * @param options The plot options to pass long with the results.
+   * @param maps In case of a cache miss, an entry will be added that maps
+   * the path of the ".map" file that needs to be created to its contents.
+   * @param aggregated_tags A set to populate with the tags aggregated by
+   * the query.
+   * @return The number of data points selected by the query.
+   */
+  private int runTsdbQuery(final HttpQuery query,
+                           final Query tsdbquery,
+                           final long end_time,
+                           final int max_age,
+                           final Plot plot,
+                           final String options,
+                           final HashMap<String, byte[]> maps,
+                           final HashSet<String> aggregated_tags) {
+    int npoints = 0;
+    // Path to the file that maps the hash of the query to the hash of its
+    // resulting time series.  Right now the contents of this file is
+    // serialized manually :-/ as follows:
+    //   2 bytes to indicate the number of time series returned by the query.
+    //   8 bytes for each hash of each time series returned by the query.
+    // Then for each tag aggregated by the query:
+    //   2 bytes for the length of the tag, followed by that number of bytes
+    //   for the tag name itself (note: the name is stored, not the UID).
+    final String path = getQueryMapCachePath(cachedir, query, tsdbquery);
+    {  // Check whether we already have cached results for this query.
+      final File cached = new File(path);
+      if (!staleCacheFile(query, end_time, max_age, cached)) {
+        final byte[] map = readFile(query, cached, 4096);
+        short n = Bytes.getShort(map);
+        int offset = 2;  // We've read one short so far (2 bytes).
+        boolean miss = false;
+        for (short i = 0; i < n; i++) {
+          long hash;
+          boolean stale;
+          try {
+            hash = Bytes.getLong(map, offset);
+            stale = staleCacheFile(query, end_time, max_age,
+              new File(Plot.getAndMkDirHashedPath(cachedir, hash, ".dat")));
+          } catch (ArrayIndexOutOfBoundsException e) {
+            hash = 0xDEADBEEF;
+            stale = true;
+          }
+          if (stale) {
+            miss = true;
+            break;
+          } else {
+            plot.add(null, hash, options);  // Use the cached .dat
+          }
+          offset += 8;
+        }
+        if (!miss) {
+          while (offset < map.length) {
+            n = Bytes.getShort(map, offset);
+            offset += 2;
+            aggregated_tags.add(new String(map, offset, n));
+            offset += n;
+          }
+          query_diskcache_hit.incrementAndGet();
+          return npoints;
+        }  // else: some of the .dat files were missing or too old.
+      }
+      query_diskcache_miss.incrementAndGet();
+    }
+
+    // Cache miss, we need to run the query against from HBase.
+    // XXX This is slow and will block Netty.  TODO(tsuna): Don't block.
+    final DataPoints[] series = tsdbquery.run();
+    for (final DataPoints datapoints : series) {
+      plot.add(datapoints, customHash(query, datapoints), options);
+      aggregated_tags.addAll(datapoints.getAggregatedTags());
+      npoints += datapoints.aggregatedSize();
+    }
+
+    // Now generating the mapping for this query to the cache files.
+    int maplen = 2 + series.length * 8;
+    for (final String aggregated_tag : aggregated_tags) {
+      maplen += 2 + aggregated_tag.length();
+    }
+    final byte[] map = new byte[maplen];
+    Bytes.setShort(map, (short) series.length);
+    int offset = 2;  // We've written one short so far (2 bytes).
+    for (final DataPoints datapoints : series) {
+      Bytes.setLong(map, customHash(query, datapoints), offset);
+      offset += 8;
+    }
+    for (final String aggregated_tag : aggregated_tags) {
+      final short n = (short) aggregated_tag.length();
+      if (n <= 0) {
+        throw new AssertionError("Overflow, tag too long: " + aggregated_tag);
+      }
+      Bytes.setShort(map, n, offset);
+      offset += 2;
+      System.arraycopy(aggregated_tag.getBytes(), 0, map, offset, n);
+      offset += n;
+    }
+    maps.put(path, map);
+
+    return npoints;
+  }
+
   // Runs Gnuplot in a subprocess to generate the graph.
   private static final class RunGnuplot implements Runnable {
 
     private final HttpQuery query;
     private final int max_age;
-    private final Plot plot;
+    private final int nplotted;
     private final String basepath;
+    private final String cachedir;
     private final HashSet<String>[] aggregated_tags;
     private final int npoints;
 
     public RunGnuplot(final HttpQuery query,
                       final int max_age,
-                      final Plot plot,
+                      final int nplotted,
                       final String basepath,
+                      final String cachedir,
                       final HashSet<String>[] aggregated_tags,
                       final int npoints) {
       this.query = query;
       this.max_age = max_age;
-      this.plot = plot;
+      this.nplotted = nplotted;
       this.basepath = basepath;
+      this.cachedir = cachedir;
       this.aggregated_tags = aggregated_tags;
       this.npoints = npoints;
     }
@@ -282,7 +451,7 @@ final class GraphHandler implements HttpRpc {
     }
 
     private void execute() throws IOException {
-      final int nplotted = runGnuplot(query, basepath, plot);
+      runGnuplot(query, cachedir, basepath);
       if (query.hasQueryStringParam("json")) {
         final StringBuilder buf = new StringBuilder(64);
         buf.append("{\"plotted\":").append(nplotted)
@@ -329,20 +498,34 @@ final class GraphHandler implements HttpRpc {
     collector.record("http.latency", gnuplotlatency, "type=gnuplot");
     collector.record("http.graph.requests", graphs_diskcache_hit, "cache=disk");
     collector.record("http.graph.requests", graphs_generated, "cache=miss");
+    collector.record("query.count", query_diskcache_hit, "cache=disk");
+    collector.record("query.count", query_diskcache_miss, "cache=miss");
   }
 
   /** Returns the base path to use for the Gnuplot files. */
-  private String getGnuplotBasePath(final HttpQuery query) {
+  @SuppressWarnings("fallthrough") // javac doesn't grok `continue' in `switch'
+  private static String getGnuplotBasePath(final String cachedir,
+                                           final HttpQuery query) {
     final Map<String, List<String>> q = query.getQueryString();
     q.remove("ignore");
-    // Super cheap caching mechanism: hash the query string.
-    final HashMap<String, List<String>> qs =
-      new HashMap<String, List<String>>(q);
-    // But first remove the parameters that don't influence the output.
-    qs.remove("png");
-    qs.remove("json");
-    qs.remove("ascii");
-    return cachedir + Integer.toHexString(qs.hashCode());
+    long hash = 0;
+    boolean shift = true;
+    for (final Map.Entry<String, List<String>> entry : q.entrySet()) {
+      final String param = entry.getKey();
+      // Ignore the parameters that don't influence the output.
+      switch (param.charAt(0)) {
+        case 'j': if ("json".equals(param)) continue;
+        case 'p': if ("png".equals(param)) continue;
+        case 'a': if ("ascii".equals(param)) continue;
+      }
+      hash ^= ((long) entry.getValue().hashCode()) << (shift ? 32 : 0);
+      shift = !shift;
+    }
+    // TODO(tsuna): The hashing above isn't very good and leads to many common
+    // prefixes.  So in the mean time simply reverse the bytes (we don't care
+    // so much about common suffixes, the prefix matters for the directories).
+    hash = Long.reverseBytes(hash);
+    return Plot.getAndMkDirHashedPath(cachedir, hash);
   }
 
   /**
@@ -701,18 +884,16 @@ final class GraphHandler implements HttpRpc {
    * Runs Gnuplot in a subprocess to generate the graph.
    * <strong>This function will block</strong> while Gnuplot is running.
    * @param query The query being handled (for logging purposes).
+   * @param cachedir Directory where to cache query results.
    * @param basepath The base path used for the Gnuplot files.
-   * @param plot The plot object to generate Gnuplot's input files.
-   * @return The number of points plotted by Gnuplot (0 or more).
    * @throws IOException if the Gnuplot files can't be written, or
    * the Gnuplot subprocess fails to start, or we can't read the
    * graph from the file it produces, or if we have been interrupted.
    * @throws GnuplotException if Gnuplot returns non-zero.
    */
-  static int runGnuplot(final HttpQuery query,
-                        final String basepath,
-                        final Plot plot) throws IOException {
-    final int nplotted = plot.dumpToFiles(basepath);
+  static void runGnuplot(final HttpQuery query,
+                         final String cachedir,
+                         final String basepath) throws IOException {
     final long start_time = System.nanoTime();
     final Process gnuplot = new ProcessBuilder(GNUPLOT,
       basepath + ".out", basepath + ".err", basepath + ".gnuplot").start();
@@ -746,7 +927,6 @@ final class GraphHandler implements HttpRpc {
     // Remove the files for stderr/stdout if they're empty.
     deleteFileIfEmpty(basepath + ".out");
     deleteFileIfEmpty(basepath + ".err");
-    return nplotted;
   }
 
   private static void deleteFileIfEmpty(final String path) {
@@ -764,11 +944,13 @@ final class GraphHandler implements HttpRpc {
    * @param query The query we're currently serving.
    * @param max_age The maximum time (in seconds) we wanna allow clients to
    * cache the result in case of a cache hit.
+   * @param cachedir Directory where to cache query results.
    * @param basepath The base path used for the Gnuplot files.
    * @param plot The plot object to generate Gnuplot's input files.
    */
   private static void respondAsciiQuery(final HttpQuery query,
                                         final int max_age,
+                                        final String cachedir,
                                         final String basepath,
                                         final Plot plot) {
     final String path = basepath + ".txt";
@@ -778,10 +960,20 @@ final class GraphHandler implements HttpRpc {
     } catch (IOException e) {
       query.internalError(e);
       return;
+    } catch (IllegalArgumentException e) {
+      query.internalError(e);
+      return;
     }
     try {
       final StringBuilder tagbuf = new StringBuilder();
-      for (final DataPoints dp : plot.getDataPoints()) {
+      Iterable<DataPoints> dps;
+      try {
+        dps = plot.getDataPoints(cachedir);
+      } catch (IOException e) {
+        query.internalError(e);
+        return;
+      }
+      for (final DataPoints dp : dps) {
         final String metric = dp.metricName();
         tagbuf.setLength(0);
         for (final Map.Entry<String, String> tag : dp.getTags().entrySet()) {
