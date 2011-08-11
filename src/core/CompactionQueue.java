@@ -60,6 +60,8 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
 
   private final AtomicLong trivial_compactions = new AtomicLong();
   private final AtomicLong complex_compactions = new AtomicLong();
+  private final AtomicLong written_cells = new AtomicLong();
+  private final AtomicLong deleted_cells = new AtomicLong();
 
   /** The {@code TSDB} instance we belong to. */
   private final TSDB tsdb;
@@ -120,6 +122,8 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
     collector.record("compaction.errors", handle_write_error.errors, "rpc=put");
     collector.record("compaction.errors",
                      DeleteCompactedCB.handle_delete_error.errors, "rpc=delete");
+    collector.record("compaction.writes", written_cells);
+    collector.record("compaction.deletes", deleted_cells);
   }
 
   /**
@@ -331,9 +335,11 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
 
     final byte[] key = compact.key();
     //LOG.debug("Compacting row " + Arrays.toString(key));
+    deleted_cells.addAndGet(row.size());  // We're going to delete this.
     if (write) {
       final byte[] qual = compact.qualifier();
       final byte[] value = compact.value();
+      written_cells.incrementAndGet();
       return tsdb.put(key, qual, value)
         .addCallbacks(new DeleteCompactedCB(tsdb, row), handle_write_error);
     } else {
