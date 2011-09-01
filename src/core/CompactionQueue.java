@@ -103,7 +103,7 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
    * unspecified.
    */
   public Deferred<ArrayList<Object>> flush() {
-    return flush(0);
+    return flush(0, Integer.MAX_VALUE);
   }
 
   /**
@@ -129,13 +129,24 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
   /**
    * Flushes all the rows in the compaction queue older than the cutoff time.
    * @param cut_off A UNIX timestamp in seconds (unsigned 32-bit integer).
+   * @param maxflushes How many rows to flush off the queue at once.
+   * This integer is expected to be strictly positive.
+   * @return A deferred that will be called back once everything has been
+   * flushed.
    */
-  private Deferred<ArrayList<Object>> flush(final long cut_off) {
+  private Deferred<ArrayList<Object>> flush(final long cut_off, int maxflushes) {
+    assert maxflushes > 0: "maxflushes must be > 0, but I got " + maxflushes;
     if (LOG.isDebugEnabled()) {
       LOG.debug("flush(), cut_off = " + cut_off);
     }
-    final ArrayList<Deferred<Object>> ds = new ArrayList<Deferred<Object>>();
+    // We can't possibly flush more entries than size().
+    maxflushes = Math.min(maxflushes, size());
+    final ArrayList<Deferred<Object>> ds =
+      new ArrayList<Deferred<Object>>(maxflushes);
     for (final byte[] row : this.keySet()) {
+      if (maxflushes-- == 0) {
+        break;
+      }
       final long base_time = Bytes.getUnsignedInt(row, metric_width);
       if (base_time > cut_off) {
         break;
@@ -752,7 +763,11 @@ final class CompactionQueue extends ConcurrentSkipListMap<byte[], Boolean> {
           // or (2) we have too many rows to recompact already.
           if (last_flush - now > Const.MAX_TIMESPAN  // (1)
               || size() > FLUSH_THRESHOLD) {         // (2)
-            flush(now / 1000 - Const.MAX_TIMESPAN - 1);
+            flush(now / 1000 - Const.MAX_TIMESPAN - 1, FLUSH_THRESHOLD);
+            if (LOG.isDebugEnabled()) {
+              LOG.debug("flush() took " + (System.currentTimeMillis() - now)
+                        + "ms, queue size=" + size());
+            }
           }
         } catch (Exception e) {
           LOG.error("Uncaught exception in compaction thread", e);
