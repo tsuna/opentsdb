@@ -15,6 +15,9 @@ package net.opentsdb.graph;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TimeZone;
 
@@ -243,6 +246,10 @@ public final class Plot {
         for (final Map.Entry<String, String> entry : params.entrySet()) {
           final String key = entry.getKey();
           final String value = entry.getValue();
+          if (key == "simplekey") {
+            // We don't want to pass this down to gnuplot but we do want to use it when generating the key
+            continue;
+          }
           if (value != null) {
             gp.append("set ").append(key)
               .append(' ').append(value).write('\n');
@@ -259,10 +266,58 @@ public final class Plot {
         }
       }
 
+      // when we simplekey; run once through to find repeated tags and if we are plotting a single metric
+      // prunedTags is a map that contains a count of "key=value" of tags and the count of metrics used.
+      Map<String, Integer> prunedTags = new HashMap<String, Integer>();
+      if (params.containsKey("simplekey")) {
+        for (int i = 0; i < nseries; i++) {
+          final DataPoints dp = datapoints.get(i);
+          final Map<String, String> tags = dp.getTags();
+          for (Object key: tags.keySet()) {
+            final String combinedKey = key.toString() + "=" + tags.get(key).toString();
+            prunedTags.put(combinedKey, prunedTags.containsKey(combinedKey) ? prunedTags.get(combinedKey) + 1 : 1);
+          }
+          prunedTags.put(dp.metricName(), prunedTags.containsKey(dp.metricName()) ? prunedTags.get(dp.metricName()) + 1 : 1);
+        }
+      }
+
       gp.write("plot ");
       for (int i = 0; i < nseries; i++) {
         final DataPoints dp = datapoints.get(i);
-        final String title = dp.metricName() + dp.getTags();
+        StringBuilder title = new StringBuilder();
+
+        if (params.containsKey("simplekey")) {
+          final Map<String, String> tags = new HashMap<String, String>();
+
+          // Build out tags dropping any tag that is the same for every metric in the plot
+          for (Map.Entry<String, String> e : dp.getTags().entrySet()) {
+            final String combinedKey = e.getKey().toString() + "=" + e.getValue().toString();
+            if (prunedTags.get(combinedKey) != nseries)
+              tags.put(e.getKey(), e.getValue());
+          }
+
+          // When multiple metrics are plotted put the metric name before the tag list, otherwise we do not show the metric name
+          if (prunedTags.get(dp.metricName()) != nseries)
+            title.append(dp.metricName() + ": ");
+
+          final List<String> stripKeys = Arrays.asList(params.get("simplekey").split("\\|"));
+
+          // Create the legend title, if a tag key is supplied to simplekey prefixed with -, we do not include it in the title.
+          // If the tag key is supplied to simplekey without a - prefix, we remove the tag key from the title but still include the tag value
+          String delim = "";
+          for (Map.Entry<String, String> e : tags.entrySet()) {
+            if (stripKeys.contains("-" + e.getKey()))
+              continue;
+            if (stripKeys.contains(e.getKey()))
+              title.append(delim).append(e.getValue());
+           else
+              title.append(delim).append(e.getKey() + "=" + e.getValue());
+           delim = ", ";
+          }
+        } else {
+          title.append(dp.metricName() + dp.getTags().toString());
+        }
+
         gp.append(" \"").append(datafiles[i]).append("\" using 1:2 title \"")
           // TODO(tsuna): Escape double quotes in title.
           .append(title).write('"');
