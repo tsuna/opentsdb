@@ -246,7 +246,7 @@ public final class Plot {
         for (final Map.Entry<String, String> entry : params.entrySet()) {
           final String key = entry.getKey();
           final String value = entry.getValue();
-          if (key == "simplekey") {
+          if (key.equals("simplekey")) {
             // We don't want to pass this down to gnuplot but we do want to use it when generating the key
             continue;
           }
