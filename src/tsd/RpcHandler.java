@@ -378,17 +378,23 @@ final class RpcHandler extends SimpleChannelUpstreamHandler {
       if (q == null) {
         throw BadRequestException.missingParameter("q");
       }
-      List<String> suggestions;
+      final Deferred<List<String>> suggestions;
       if ("metrics".equals(type)) {
-        suggestions = tsdb.suggestMetrics(q);
+        suggestions = tsdb.suggestMetricsAsync(q);
       } else if ("tagk".equals(type)) {
-        suggestions = tsdb.suggestTagNames(q);
+        suggestions = tsdb.suggestTagNamesAsync(q);
       } else if ("tagv".equals(type)) {
-        suggestions = tsdb.suggestTagValues(q);
+        suggestions = tsdb.suggestTagValuesAsync(q);
       } else {
         throw new BadRequestException("Invalid 'type' parameter:" + type);
       }
-      query.sendJsonArray(suggestions);
+      class Respond implements Callback<Object, List<String>> {
+        public Object call(final List<String> suggestions) {
+          query.sendJsonArray(suggestions);
+          return null;
+        }
+      }
+      suggestions.addCallbacks(new Respond(), query.internalErrorCallback());
     }
   }
 

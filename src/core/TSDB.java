@@ -372,6 +372,9 @@ public final class TSDB {
 
   /**
    * Given a prefix search, returns a few matching metric names.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #suggestMetricsAsync} instead.
    * @param search A prefix to search.
    */
   public List<String> suggestMetrics(final String search) {
@@ -379,7 +382,19 @@ public final class TSDB {
   }
 
   /**
+   * Given a prefix search, returns a few matching metric names.
+   * @param search A prefix to search.
+   * @since 1.2
+   */
+  public Deferred<List<String>> suggestMetricsAsync(final String search) {
+    return metrics.suggestAsync(search);
+  }
+
+  /**
    * Given a prefix search, returns a few matching tag names.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #suggestTagNamesAsync} instead.
    * @param search A prefix to search.
    */
   public List<String> suggestTagNames(final String search) {
@@ -387,11 +402,32 @@ public final class TSDB {
   }
 
   /**
+   * Given a prefix search, returns a few matching tag names.
+   * @param search A prefix to search.
+   * @since 1.2
+   */
+  public Deferred<List<String>> suggestTagNamesAsync(final String search) {
+    return tag_names.suggestAsync(search);
+  }
+
+  /**
    * Given a prefix search, returns a few matching tag values.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #suggestTagValuesAsync} instead.
    * @param search A prefix to search.
    */
   public List<String> suggestTagValues(final String search) {
     return tag_values.suggest(search);
+  }
+
+  /**
+   * Given a prefix search, returns a few matching tag values.
+   * @param search A prefix to search.
+   * @since 1.2
+   */
+  public Deferred<List<String>> suggestTagValuesAsync(final String search) {
+    return tag_values.suggestAsync(search);
   }
 
   /**
