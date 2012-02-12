@@ -141,34 +141,77 @@ public final class UniqueId implements UniqueIdInterface {
     idCache.clear();
   }
 
+  /**
+   * Finds the name associated with a given ID.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #getNameAsync} instead.
+   * @param id The ID associated with that name.
+   * @see #getId(String)
+   * @see #getOrCreateId(String)
+   * @throws NoSuchUniqueId if the given ID is not assigned.
+   * @throws HBaseException if there is a problem communicating with HBase.
+   * @throws IllegalArgumentException if the ID given in argument is encoded
+   * on the wrong number of bytes.
+   */
   public String getName(final byte[] id) throws NoSuchUniqueId, HBaseException {
+    try {
+      return getNameAsync(id).joinUninterruptibly();
+    } catch (RuntimeException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new RuntimeException("Should never be here", e);
+    }
+  }
+
+  /**
+   * Finds the name associated with a given ID.
+   *
+   * @param id The ID associated with that name.
+   * @see #getIdAsync(String)
+   * @see #getOrCreateId(String)
+   * @throws NoSuchUniqueId if the given ID is not assigned.
+   * @throws HBaseException if there is a problem communicating with HBase.
+   * @throws IllegalArgumentException if the ID given in argument is encoded
+   * on the wrong number of bytes.
+   * @since 1.2
+   */
+  public Deferred<String> getNameAsync(final byte[] id) {
     if (id.length != idWidth) {
       throw new IllegalArgumentException("Wrong id.length = " + id.length
                                          + " which is != " + idWidth
                                          + " required for '" + kind() + '\'');
     }
-    String name = getNameFromCache(id);
+    final String name = getNameFromCache(id);
     if (name != null) {
       cacheHits++;
-    } else {
-      cacheMisses++;
-      name = getNameFromHBase(id);
-      if (name == null) {
-        throw new NoSuchUniqueId(kind(), id);
-      }
-      addNameToCache(id, name);
-      addIdToCache(name, id);
+      return Deferred.fromResult(name);
     }
-    return name;
+    cacheMisses++;
+    class GetNameCB implements Callback<String, String> {
+      public String call(final String name) {
+        if (name == null) {
+          throw new NoSuchUniqueId(kind(), id);
+        }
+        addNameToCache(id, name);
+        addIdToCache(name, id);
+        return name;
+      }
+    }
+    return getNameFromHBase(id).addCallback(new GetNameCB());
   }
 
   private String getNameFromCache(final byte[] id) {
     return idCache.get(fromBytes(id));
   }
 
-  private String getNameFromHBase(final byte[] id) throws HBaseException {
-    final byte[] name = hbaseGet(id, NAME_FAMILY);
-    return name == null ? null : fromBytes(name);
+  private Deferred<String> getNameFromHBase(final byte[] id) {
+    class NameFromHBaseCB implements Callback<String, byte[]> {
+      public String call(final byte[] name) {
+        return name == null ? null : fromBytes(name);
+      }
+    }
+    return hbaseGet(id, NAME_FAMILY).addCallback(new NameFromHBaseCB());
   }
 
   private void addNameToCache(final byte[] id, final String name) {
@@ -183,32 +226,77 @@ public final class UniqueId implements UniqueIdInterface {
     }
   }
 
+  /**
+   * Finds the ID associated with a given name.
+   * <p>
+   * The length of the byte array is fixed in advance by the implementation.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #getIdAsync} instead.
+   *
+   * @param name The name to lookup in the table.
+   * @see #getName(byte[])
+   * @return A non-null, non-empty {@code byte[]} array.
+   * @throws NoSuchUniqueName if the name requested doesn't have an ID assigned.
+   * @throws HBaseException if there is a problem communicating with HBase.
+   * @throws IllegalStateException if the ID found in HBase is encoded on the
+   * wrong number of bytes.
+   */
   public byte[] getId(final String name) throws NoSuchUniqueName, HBaseException {
-    byte[] id = getIdFromCache(name);
+    try {
+      return getIdAsync(name).joinUninterruptibly();
+    } catch (RuntimeException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new RuntimeException("Should never be here", e);
+    }
+  }
+
+  /**
+   * Finds the ID associated with a given name.
+   * <p>
+   * The length of the byte array is fixed in advance by the implementation.
+   *
+   * @param name The name to lookup in the table.
+   * @see #getNameAsync(byte[])
+   * @return A non-null, non-empty {@code byte[]} array.
+   * @throws NoSuchUniqueName if the name requested doesn't have an ID assigned.
+   * @throws HBaseException if there is a problem communicating with HBase.
+   * @throws IllegalStateException if the ID found in HBase is encoded on the
+   * wrong number of bytes.
+   * @since 1.2
+   */
+  public Deferred<byte[]> getIdAsync(final String name) {
+    final byte[] id = getIdFromCache(name);
     if (id != null) {
       cacheHits++;
-    } else {
-      cacheMisses++;
-      id = getIdFromHBase(name);
-      if (id == null) {
-        throw new NoSuchUniqueName(kind(), name);
-      }
-      if (id.length != idWidth) {
-        throw new IllegalStateException("Found id.length = " + id.length
-                                        + " which is != " + idWidth
-                                        + " required for '" + kind() + '\'');
-      }
-      addIdToCache(name, id);
-      addNameToCache(id, name);
+      return Deferred.fromResult(id);
     }
-    return id;
+    cacheMisses++;
+    class GetIdCB implements Callback<byte[], byte[]> {
+      public byte[] call(final byte[] id) {
+        if (id == null) {
+          throw new NoSuchUniqueName(kind(), name);
+        }
+        if (id.length != idWidth) {
+          throw new IllegalStateException("Found id.length = " + id.length
+                                          + " which is != " + idWidth
+                                          + " required for '" + kind() + '\'');
+        }
+        addIdToCache(name, id);
+        addNameToCache(id, name);
+        return id;
+      }
+    }
+    Deferred<byte[]> d = getIdFromHBase(name).addCallback(new GetIdCB());
+    return d;
   }
 
   private byte[] getIdFromCache(final String name) {
     return nameCache.get(name);
   }
 
-  private byte[] getIdFromHBase(final String name) throws HBaseException {
+  private Deferred<byte[]> getIdFromHBase(final String name) {
     return hbaseGet(toBytes(name), ID_FAMILY);
   }
 
@@ -570,21 +658,18 @@ public final class UniqueId implements UniqueIdInterface {
   }
 
   /** Returns the cell of the specified row key, using family:kind. */
-  private byte[] hbaseGet(final byte[] key,
-                          final byte[] family) throws HBaseException {
+  private Deferred<byte[]> hbaseGet(final byte[] key, final byte[] family) {
     final GetRequest get = new GetRequest(table, key);
     get.family(family).qualifier(kind);
-    try {
-      final ArrayList<KeyValue> row = client.get(get).joinUninterruptibly();
-      if (row == null || row.isEmpty()) {
-        return null;
+    class GetCB implements Callback<byte[], ArrayList<KeyValue>> {
+      public byte[] call(final ArrayList<KeyValue> row) {
+        if (row == null || row.isEmpty()) {
+          return null;
+        }
+        return row.get(0).value();
       }
-      return row.get(0).value();
-    } catch (HBaseException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new RuntimeException("Should never be here", e);
     }
+    return client.get(get).addCallback(new GetCB());
   }
 
   /**

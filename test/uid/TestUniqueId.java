@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import com.stumbleupon.async.Callback;
 import com.stumbleupon.async.Deferred;
 
 import org.hbase.async.AtomicIncrementRequest;
@@ -317,22 +318,25 @@ public final class TestUniqueId {
     kvs.add(new KeyValue(byte_name, ID, kind_array, id));
 
     @SuppressWarnings("unchecked")
-    final Deferred<ArrayList<KeyValue>> d = mock(Deferred.class);
+    final Deferred<ArrayList<KeyValue>> d = PowerMockito.spy(new Deferred<ArrayList<KeyValue>>());
     when(client.get(anyGet()))
       .thenReturn(d)
       .thenReturn(Deferred.fromResult(kvs));
 
     final Answer<byte[]> the_race = new Answer<byte[]>() {
-      public byte[] answer(final InvocationOnMock unused_invocation) {
+      public byte[] answer(final InvocationOnMock unused_invocation) throws Exception {
         // While answering A's first Get, B doest a full getOrCreateId.
         assertArrayEquals(id, uid_b.getOrCreateId("foo"));
+        d.callback(null);
+        Object result = d.join();  // Throws.
+        fail("Should never be here: " + result);
         return null;
       }
     };
 
+    // Start the race when answering A's first Get.
     try {
-      when(d.joinUninterruptibly())
-        .thenAnswer(the_race);  // Start the race when answering A's first Get.
+      PowerMockito.doAnswer(the_race).when(d).joinUninterruptibly();
     } catch (Exception e) {
       fail("Should never happen: " + e);
     }
