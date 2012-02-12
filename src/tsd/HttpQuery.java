@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import com.stumbleupon.async.Callback;
 import com.stumbleupon.async.Deferred;
 
 import ch.qos.logback.classic.spi.ThrowableProxy;
@@ -191,6 +192,25 @@ final class HttpQuery {
    */
   public List<String> getQueryStringParams(final String paramname) {
     return getQueryString().get(paramname);
+  }
+
+  /** Helper to trigger an internal error on an exception.  */
+  private final class ErrorCB implements Callback<Exception, Exception> {
+    public Exception call(final Exception e) {
+      internalError(e);
+      return e;
+    }
+  }
+
+  /**
+   * Returns an "errback" that can be used to trigger an internal error.
+   * <p>
+   * When the callback is invoked, it calls {@link #internalError} and
+   * returns its argument unchanged.
+   * @since 1.2
+   */
+  public Callback<Exception, Exception> internalErrorCallback() {
+    return new ErrorCB();
   }
 
   /**
