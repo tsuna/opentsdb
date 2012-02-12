@@ -19,6 +19,9 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.stumbleupon.async.Callback;
+import com.stumbleupon.async.Deferred;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -357,6 +360,9 @@ public final class UniqueId implements UniqueIdInterface {
 
   /**
    * Attempts to find suggestions of names given a search term.
+   * <p>
+   * <strong>This method is blocking.</strong>  Its use within OpenTSDB itself
+   * is discouraged, please use {@link #suggestAsync} instead.
    * @param search The search term (possibly empty).
    * @return A list of known valid names that have UIDs that sort of match
    * the search term.  If the search term is empty, returns the first few
@@ -365,13 +371,53 @@ public final class UniqueId implements UniqueIdInterface {
    * HBase.
    */
   public List<String> suggest(final String search) throws HBaseException {
-    // TODO(tsuna): Add caching to try to avoid re-scanning the same thing.
-    final Scanner scanner = getSuggestScanner(search);
-    final LinkedList<String> suggestions = new LinkedList<String>();
     try {
-      ArrayList<ArrayList<KeyValue>> rows;
-      while ((short) suggestions.size() < MAX_SUGGESTIONS
-             && (rows = scanner.nextRows().joinUninterruptibly()) != null) {
+      return suggestAsync(search).joinUninterruptibly();
+    } catch (HBaseException e) {
+      throw e;
+    } catch (Exception e) {  // Should never happen.
+      final String msg = "Unexpected exception caught by "
+        + this + ".suggest(" + search + ')';
+      LOG.error(msg, e);
+      throw new RuntimeException(msg, e);  // Should never happen.
+    }
+  }
+
+  /**
+   * Attempts to find suggestions of names given a search term.
+   * @param search The search term (possibly empty).
+   * @return A list of known valid names that have UIDs that sort of match
+   * the search term.  If the search term is empty, returns the first few
+   * terms.
+   * @throws HBaseException if there was a problem getting suggestions from
+   * HBase.
+   * @since 1.2
+   */
+  public Deferred<List<String>> suggestAsync(final String search) {
+    return new SuggestCB(search).search();
+  }
+
+  /**
+   * Helper callback to asynchronously scan HBase for suggestions.
+   */
+  private final class SuggestCB
+    implements Callback<Object, ArrayList<ArrayList<KeyValue>>> {
+    private final LinkedList<String> suggestions = new LinkedList<String>();
+    private final Scanner scanner;
+
+    SuggestCB(final String search) {
+      this.scanner = getSuggestScanner(search);
+    }
+
+    @SuppressWarnings("unchecked")
+    Deferred<List<String>> search() {
+      return (Deferred) scanner.nextRows().addCallback(this);
+    }
+
+    public Object call(final ArrayList<ArrayList<KeyValue>> rows) {
+      if (rows == null) {  // We're done scanning.
+        return suggestions;
+      } else {
         for (final ArrayList<KeyValue> row : rows) {
           if (row.size() != 1) {
             LOG.error("WTF shouldn't happen!  Scanner " + scanner + " returned"
@@ -393,16 +439,15 @@ public final class UniqueId implements UniqueIdInterface {
               + " in cache, but just scanned id=" + Arrays.toString(id));
           }
           suggestions.add(name);
+          if ((short) suggestions.size() >= MAX_SUGGESTIONS) {
+            scanner.close();
+            return suggestions;  // We have enough.
+          }
+          row.clear();  // free()
         }
       }
-    } catch (HBaseException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new RuntimeException("Should never be here", e);
-    } finally {
-      scanner.close();
+      return search();  // Get more suggestions.
     }
-    return suggestions;
   }
 
   /**
