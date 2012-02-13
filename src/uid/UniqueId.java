@@ -71,20 +71,20 @@ public final class UniqueId implements UniqueIdInterface {
   /** The kind of UniqueId, used as the column qualifier. */
   private final byte[] kind;
   /** Number of bytes on which each ID is encoded. */
-  private final short idWidth;
+  private final short id_width;
 
   /** Cache for forward mappings (name to ID). */
-  private final ConcurrentHashMap<String, byte[]> nameCache =
+  private final ConcurrentHashMap<String, byte[]> name_cache =
     new ConcurrentHashMap<String, byte[]>();
   /** Cache for backward mappings (ID to name).
    * The ID in the key is a byte[] converted to a String to be Comparable. */
-  private final ConcurrentHashMap<String, String> idCache =
+  private final ConcurrentHashMap<String, String> id_cache =
     new ConcurrentHashMap<String, String>();
 
   /** Number of times we avoided reading from HBase thanks to the cache. */
-  private volatile int cacheHits;
+  private volatile int cache_hits;
   /** Number of times we had to read from HBase and populate the cache. */
-  private volatile int cacheMisses;
+  private volatile int cache_misses;
 
   /**
    * Constructor.
@@ -95,7 +95,9 @@ public final class UniqueId implements UniqueIdInterface {
    * @throws IllegalArgumentException if width is negative or too small/large
    * or if kind is an empty string.
    */
-  public UniqueId(final HBaseClient client, final byte[] table, final String kind,
+  public UniqueId(final HBaseClient client,
+                  final byte[] table,
+                  final String kind,
                   final int width) {
     this.client = client;
     this.table = table;
@@ -106,22 +108,22 @@ public final class UniqueId implements UniqueIdInterface {
     if (width < 1 || width > 8) {
       throw new IllegalArgumentException("Invalid width: " + width);
     }
-    this.idWidth = (short) width;
+    this.id_width = (short) width;
   }
 
   /** The number of times we avoided reading from HBase thanks to the cache. */
   public int cacheHits() {
-    return cacheHits;
+    return cache_hits;
   }
 
   /** The number of times we had to read from HBase and populate the cache. */
   public int cacheMisses() {
-    return cacheMisses;
+    return cache_misses;
   }
 
   /** Returns the number of elements stored in the internal cache. */
   public int cacheSize() {
-    return nameCache.size() + idCache.size();
+    return name_cache.size() + id_cache.size();
   }
 
   public String kind() {
@@ -129,7 +131,7 @@ public final class UniqueId implements UniqueIdInterface {
   }
 
   public short width() {
-    return idWidth;
+    return id_width;
   }
 
   /**
@@ -137,8 +139,8 @@ public final class UniqueId implements UniqueIdInterface {
    * @since 1.1
    */
   public void dropCaches() {
-    nameCache.clear();
-    idCache.clear();
+    name_cache.clear();
+    id_cache.clear();
   }
 
   /**
@@ -177,17 +179,17 @@ public final class UniqueId implements UniqueIdInterface {
    * @since 1.2
    */
   public Deferred<String> getNameAsync(final byte[] id) {
-    if (id.length != idWidth) {
+    if (id.length != id_width) {
       throw new IllegalArgumentException("Wrong id.length = " + id.length
-                                         + " which is != " + idWidth
+                                         + " which is != " + id_width
                                          + " required for '" + kind() + '\'');
     }
     final String name = getNameFromCache(id);
     if (name != null) {
-      cacheHits++;
+      cache_hits++;
       return Deferred.fromResult(name);
     }
-    cacheMisses++;
+    cache_misses++;
     class GetNameCB implements Callback<String, String> {
       public String call(final String name) {
         if (name == null) {
@@ -201,7 +203,7 @@ public final class UniqueId implements UniqueIdInterface {
   }
 
   private String getNameFromCache(final byte[] id) {
-    return idCache.get(fromBytes(id));
+    return id_cache.get(fromBytes(id));
   }
 
   private Deferred<String> getNameFromHBase(final byte[] id) {
@@ -215,9 +217,9 @@ public final class UniqueId implements UniqueIdInterface {
 
   private void addNameToCache(final byte[] id, final String name) {
     final String key = fromBytes(id);
-    String found = idCache.get(key);
+    String found = id_cache.get(key);
     if (found == null) {
-      found = idCache.putIfAbsent(key, name);
+      found = id_cache.putIfAbsent(key, name);
     }
     if (found != null && !found.equals(name)) {
       throw new IllegalStateException("id=" + Arrays.toString(id) + " => name="
@@ -268,18 +270,18 @@ public final class UniqueId implements UniqueIdInterface {
   public Deferred<byte[]> getIdAsync(final String name) {
     final byte[] id = getIdFromCache(name);
     if (id != null) {
-      cacheHits++;
+      cache_hits++;
       return Deferred.fromResult(id);
     }
-    cacheMisses++;
+    cache_misses++;
     class GetIdCB implements Callback<byte[], byte[]> {
       public byte[] call(final byte[] id) {
         if (id == null) {
           throw new NoSuchUniqueName(kind(), name);
         }
-        if (id.length != idWidth) {
+        if (id.length != id_width) {
           throw new IllegalStateException("Found id.length = " + id.length
-                                          + " which is != " + idWidth
+                                          + " which is != " + id_width
                                           + " required for '" + kind() + '\'');
         }
         cacheMapping(name, id);
@@ -291,7 +293,7 @@ public final class UniqueId implements UniqueIdInterface {
   }
 
   private byte[] getIdFromCache(final String name) {
-    return nameCache.get(name);
+    return name_cache.get(name);
   }
 
   private Deferred<byte[]> getIdFromHBase(final String name) {
@@ -299,9 +301,9 @@ public final class UniqueId implements UniqueIdInterface {
   }
 
   private void addIdToCache(final String name, final byte[] id) {
-    byte[] found = nameCache.get(name);
+    byte[] found = name_cache.get(name);
     if (found == null) {
-      found = nameCache.putIfAbsent(name,
+      found = name_cache.putIfAbsent(name,
                                     // Must make a defensive copy to be immune
                                     // to any changes the caller may do on the
                                     // array later on.
@@ -343,23 +345,23 @@ public final class UniqueId implements UniqueIdInterface {
         LOG.info("Got ID=" + id
                  + " for kind='" + kind() + "' name='" + name + "'");
         // row.length should actually be 8.
-        if (row.length < idWidth) {
+        if (row.length < id_width) {
           throw new IllegalStateException("OMG, row.length = " + row.length
-                                          + " which is less than " + idWidth
+                                          + " which is less than " + id_width
                                           + " for id=" + id
                                           + " row=" + Arrays.toString(row));
         }
         // Verify that we're going to drop bytes that are 0.
-        for (int i = 0; i < row.length - idWidth; i++) {
+        for (int i = 0; i < row.length - id_width; i++) {
           if (row[i] != 0) {
             final String message = "All Unique IDs for " + kind()
-              + " on " + idWidth + " bytes are already assigned!";
+              + " on " + id_width + " bytes are already assigned!";
             LOG.error("OMG " + message);
             throw new IllegalStateException(message);
           }
         }
         // Shrink the ID on the requested number of bytes.
-        row = Arrays.copyOfRange(row, row.length - idWidth, row.length);
+        row = Arrays.copyOfRange(row, row.length - id_width, row.length);
       } catch (HBaseException e) {
         LOG.error("Failed to assign an ID, atomic increment on row="
                   + Arrays.toString(MAXID_ROW) + " column='" +
@@ -521,7 +523,7 @@ public final class UniqueId implements UniqueIdInterface {
           final byte[] key = row.get(0).key();
           final String name = fromBytes(key);
           final byte[] id = row.get(0).value();
-          final byte[] cached_id = nameCache.get(name);
+          final byte[] cached_id = name_cache.get(name);
           if (cached_id == null) {
             cacheMapping(name, id);
           } else if (!Arrays.equals(id, cached_id)) {
@@ -607,8 +609,8 @@ public final class UniqueId implements UniqueIdInterface {
 
     // Update cache.
     addIdToCache(newname, row);            // add     new name -> ID
-    idCache.put(fromBytes(row), newname);  // update  ID -> new name
-    nameCache.remove(oldname);             // remove  old name -> ID
+    id_cache.put(fromBytes(row), newname);  // update  ID -> new name
+    name_cache.remove(oldname);             // remove  old name -> ID
 
     // Delete the old forward mapping.
     try {
@@ -723,7 +725,7 @@ public final class UniqueId implements UniqueIdInterface {
 
   /** Returns a human readable string representation of the object. */
   public String toString() {
-    return "UniqueId(" + fromBytes(table) + ", " + kind() + ", " + idWidth + ")";
+    return "UniqueId(" + fromBytes(table) + ", " + kind() + ", " + id_width + ")";
   }
 
 }
