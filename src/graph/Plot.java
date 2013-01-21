@@ -235,15 +235,23 @@ public final class Plot {
     final String script_path = basepath + ".gnuplot";
     final PrintWriter gp = new PrintWriter(script_path);
     try {
-      // XXX don't hardcode all those settings.  At least not like that.
-      gp.append("set term pngcairo enhanced rounded size ")
-        // Why the fuck didn't they also add methods for numbers?
-        .append(Short.toString(width)).append(",")
-        .append(Short.toString(height));
       final String smooth = params.remove("smooth");
       final String brewer = params.remove("brewer");
       final String fgcolor = params.remove("fgcolor");
       String bgcolor = params.remove("bgcolor");
+      String cairo = params.remove("cairo");
+      if (cairo != null) {
+        // XXX don't hardcode all those settings.  At least not like that.
+        gp.append("set term pngcairo enhanced rounded size ")
+          // Why the fuck didn't they also add methods for numbers?
+          .append(Short.toString(width)).append(",")
+          .append(Short.toString(height));
+      } else {
+        gp.append("set term png small size ")
+          .append(Short.toString(width)).append(",")
+          .append(Short.toString(height));
+      }
+
       if (fgcolor != null && bgcolor == null) {
         // We can't specify a fgcolor without specifying a bgcolor.
         bgcolor = "xFFFFFF";  // So use a default.
@@ -260,16 +268,17 @@ public final class Plot {
       if (fgcolor != null) {
         gp.append(' ').append(fgcolor);
       }
-      // Beautifications - Jeremy
-      gp.append("\n" 
-                + "set font \"Sans,14\"\n"
-                + "set style line 80 lt rgb \"#808080\"\n"
-                + "set style line 81 lt 0\n"
-                + "set style line 81 lt rgb \"#808080\"\n"
-                + "set border 3 back linestyle 80\n"
-                + "set xtics nomirror\n"
-                + "set ytics nomirror\n");
-
+      if (cairo != null) {
+        // Beautifications - Jeremy
+        gp.append("\n" 
+                  + "set font \"Sans,14\"\n"
+                  + "set style line 80 lt rgb \"#808080\"\n"
+                  + "set style line 81 lt 0\n"
+                  + "set style line 81 lt rgb \"#808080\"\n"
+                  + "set border 3 back linestyle 80\n"
+                  + "set xtics nomirror\n"
+                  + "set ytics nomirror\n");
+      }
       gp.append("\n"
                 + "set xdata time\n"
                 + "set timefmt \"%s\"\n"
@@ -285,8 +294,12 @@ public final class Plot {
       }
       final int nseries = datapoints.size();
       if (nseries > 0) {
-        gp.write("set grid back linestyle 81\n"
-                 + "set style data linespoints\n");
+        if (cairo != null) {
+          gp.write("set grid back linestyle 81\n");
+        } else {
+          gp.write("set grid\n");
+        }
+        gp.write("set style data linespoints\n");
         if (!params.containsKey("key")) {
           gp.write("set key right box\n");
         }

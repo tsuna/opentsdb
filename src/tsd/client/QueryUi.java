@@ -121,6 +121,7 @@ public class QueryUi implements EntryPoint, HistoryListener {
   // Styling options.
   private final CheckBox smooth = new CheckBox();
   private final CheckBox brewer = new CheckBox();
+  private final CheckBox cairo = new CheckBox();
 
   /**
    * Handles every change to the query form and gets a new graph.
@@ -257,6 +258,7 @@ public class QueryUi implements EntryPoint, HistoryListener {
     nokey.addClickHandler(refreshgraph);
     smooth.addClickHandler(refreshgraph);
     brewer.addClickHandler(refreshgraph);
+    cairo.addClickHandler(refreshgraph);
 
     yrange.setValidationRegexp("^("                            // Nothing or
                                + "|\\[([-+.0-9eE]+|\\*)?"      // "[start
@@ -445,6 +447,8 @@ public class QueryUi implements EntryPoint, HistoryListener {
     grid.setWidget(0, 2, smooth);
     grid.setText(1, 1, "Brewer");
     grid.setWidget(1, 2, brewer);
+    grid.setText(2, 1, "Cairo");
+    grid.setWidget(2, 2, cairo);
     return grid;
   }
 
@@ -798,6 +802,7 @@ public class QueryUi implements EntryPoint, HistoryListener {
     nokey.setValue(qs.containsKey("nokey"));
     smooth.setValue(qs.containsKey("smooth"));
     brewer.setValue(qs.containsKey("brewer"));
+    cairo.setValue(qs.containsKey("cairo"));
   }
 
   private void refreshGraph() {
@@ -855,6 +860,9 @@ public class QueryUi implements EntryPoint, HistoryListener {
     }
     if (brewer.getValue()) {
       url.append("&brewer=true");
+    }
+    if (cairo.getValue()) {
+      url.append("&cairo=true");
     }
     final String uri = url.toString();
     if (uri.equals(lastgraphuri)) {
