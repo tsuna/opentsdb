@@ -235,14 +235,23 @@ public final class Plot {
     final String script_path = basepath + ".gnuplot";
     final PrintWriter gp = new PrintWriter(script_path);
     try {
-      // XXX don't hardcode all those settings.  At least not like that.
-      gp.append("set term png small size ")
-        // Why the fuck didn't they also add methods for numbers?
-        .append(Short.toString(width)).append(",")
-        .append(Short.toString(height));
       final String smooth = params.remove("smooth");
+      final String brewer = params.remove("brewer");
       final String fgcolor = params.remove("fgcolor");
       String bgcolor = params.remove("bgcolor");
+      String cairo = params.remove("cairo");
+      if (cairo != null) {
+        // XXX don't hardcode all those settings.  At least not like that.
+        gp.append("set term pngcairo fontscale 0.5 rounded size ")
+          // Why the fuck didn't they also add methods for numbers?
+          .append(Short.toString(width)).append(",")
+          .append(Short.toString(height));
+      } else {
+        gp.append("set term png small size ")
+          .append(Short.toString(width)).append(",")
+          .append(Short.toString(height));
+      }
+
       if (fgcolor != null && bgcolor == null) {
         // We can't specify a fgcolor without specifying a bgcolor.
         bgcolor = "xFFFFFF";  // So use a default.
@@ -259,7 +268,17 @@ public final class Plot {
       if (fgcolor != null) {
         gp.append(' ').append(fgcolor);
       }
-
+      if (cairo != null) {
+        // Beautifications - Jeremy
+        gp.append("\n" 
+                  + "set font \"Sans,14\"\n"
+                  + "set style line 80 lt rgb \"#808080\"\n"
+                  + "set style line 81 lt 0\n"
+                  + "set style line 81 lt rgb \"#808080\"\n"
+                  + "set border 3 back linestyle 80\n"
+                  + "set xtics nomirror\n"
+                  + "set ytics nomirror\n");
+      }
       gp.append("\n"
                 + "set xdata time\n"
                 + "set timefmt \"%s\"\n"
@@ -275,8 +294,12 @@ public final class Plot {
       }
       final int nseries = datapoints.size();
       if (nseries > 0) {
-        gp.write("set grid\n"
-                 + "set style data linespoints\n");
+        if (cairo != null) {
+          gp.write("set grid back linestyle 81\n");
+        } else {
+          gp.write("set grid\n");
+        }
+        gp.write("set style data linespoints\n");
         if (!params.containsKey("key")) {
           gp.write("set key right box\n");
         }
@@ -305,6 +328,26 @@ public final class Plot {
           gp.write("set y2tics border\n");
           break;
         }
+      }
+      if (brewer != null) {
+        gp.append("set style line 1 linecolor rgbcolor \"#7297E6\" linewidth 1 pt 7\n");
+        gp.append("set style line 2 linecolor rgbcolor \"#67EB84\" linewidth 1 pt 5\n");
+        gp.append("set style line 3 linecolor rgbcolor \"#F97A6D\" linewidth 1 pt 9\n");
+        gp.append("set style line 4 linecolor rgbcolor \"#F9C96D\" linewidth 1 pt 13\n");
+        gp.append("set style line 5 linecolor rgbcolor \"#1D4599\" linewidth 1 pt 11\n");
+        gp.append("set style line 6 linecolor rgbcolor \"#11AD34\" linewidth 1 pt 7\n");
+        gp.append("set style line 7 linecolor rgbcolor \"#E62B17\" linewidth 1 pt 5\n");
+        gp.append("set style line 8 linecolor rgbcolor \"#E69F17\" linewidth 1 pt 9\n");
+        gp.append("set style line 9 linecolor rgbcolor \"#2F3F60\" linewidth 1 pt 13\n");
+        gp.append("set style line 10 linecolor rgbcolor \"#2F6C3D\" linewidth 1 pt 11\n");
+        gp.append("set style line 11 linecolor rgbcolor \"#8F463F\" linewidth 1 pt 7\n");
+        gp.append("set style line 12 linecolor rgbcolor \"#8F743F\" linewidth 1 pt 5\n");
+        gp.append("set style line 13 linecolor rgbcolor \"#031A49\" linewidth 1 pt 9\n");
+        gp.append("set style line 14 linecolor rgbcolor \"#025214\" linewidth 1 pt 13\n");
+        gp.append("set style line 15 linecolor rgbcolor \"#6D0D03\" linewidth 1 pt 11\n");
+        gp.append("set style line 16 linecolor rgbcolor \"#6D4903\" linewidth 1 pt 7\n");
+        gp.append("set style line 17 linecolor rgbcolor \"#224499\" linewidth 1 pt 5\n");
+        gp.append("set style increment user\n");
       }
 
       gp.write("plot ");
