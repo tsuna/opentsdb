@@ -242,7 +242,7 @@ public final class Plot {
       String cairo = params.remove("cairo");
       if (cairo != null) {
         // XXX don't hardcode all those settings.  At least not like that.
-        gp.append("set term pngcairo enhanced rounded size ")
+        gp.append("set term pngcairo fontscale 0.5 rounded size ")
           // Why the fuck didn't they also add methods for numbers?
           .append(Short.toString(width)).append(",")
           .append(Short.toString(height));
