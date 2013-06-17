@@ -292,17 +292,24 @@ public final class TSDB {
     }
 
     IncomingDataPoints.checkMetricAndTags(metric, tags);
-    final byte[] row = IncomingDataPoints.rowKeyTemplate(this, metric, tags);
-    final long base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
-    Bytes.setInt(row, (int) base_time, metrics.width());
-    scheduleForCompaction(row, (int) base_time);
-    final short qualifier = (short) ((timestamp - base_time) << Const.FLAG_BITS
-                                     | flags);
-    final PutRequest point = new PutRequest(table, row, FAMILY,
-                                            Bytes.fromShort(qualifier), value);
-    // TODO(tsuna): Add a callback to time the latency of HBase and store the
-    // timing in a moving Histogram (once we have a class for this).
-    return client.put(point);
+
+    class AddPointCB implements Callback<Deferred<Object>, byte[]> {
+      public Deferred<Object> call(final byte[] row) {
+        final long base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+        Bytes.setInt(row, (int) base_time, metrics.width());
+        scheduleForCompaction(row, (int) base_time);
+        final short qualifier = (short) ((timestamp - base_time) << Const.FLAG_BITS
+                                         | flags);
+        final PutRequest point = new PutRequest(table, row, FAMILY,
+                                                Bytes.fromShort(qualifier), value);
+        // TODO(tsuna): Add a callback to time the latency of HBase and store the
+        // timing in a moving Histogram (once we have a class for this).
+        return client.put(point);
+      }
+    }
+
+    return IncomingDataPoints.rowKeyTemplate(this, metric, tags)
+      .addCallbackDeferring(new AddPointCB());
   }
 
   /**
