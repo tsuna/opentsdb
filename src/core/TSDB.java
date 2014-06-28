@@ -12,30 +12,20 @@
 // see <http://www.gnu.org/licenses/>.
 package net.opentsdb.core;
 
+import com.stumbleupon.async.Callback;
+import com.stumbleupon.async.Deferred;
+import com.stumbleupon.async.DeferredGroupException;
+import net.opentsdb.stats.Histogram;
+import net.opentsdb.stats.StatsCollector;
+import net.opentsdb.uid.UniqueId;
+import org.hbase.async.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-
-import com.stumbleupon.async.Callback;
-import com.stumbleupon.async.Deferred;
-import com.stumbleupon.async.DeferredGroupException;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import org.hbase.async.Bytes;
-import org.hbase.async.ClientStats;
-import org.hbase.async.DeleteRequest;
-import org.hbase.async.GetRequest;
-import org.hbase.async.HBaseClient;
-import org.hbase.async.HBaseException;
-import org.hbase.async.KeyValue;
-import org.hbase.async.PutRequest;
-
-import net.opentsdb.uid.UniqueId;
-import net.opentsdb.stats.Histogram;
-import net.opentsdb.stats.StatsCollector;
 
 /**
  * Thread-safe implementation of the TSDB client.
@@ -344,12 +334,101 @@ public final class TSDB {
     scheduleForCompaction(row, (int) base_time);
     final short qualifier = (short) ((timestamp - base_time) << Const.FLAG_BITS
                                      | flags);
-    final PutRequest point = new PutRequest(table, row, FAMILY,
-                                            Bytes.fromShort(qualifier), value);
+    final PutRequest point = new PutRequest(table, row, FAMILY, Bytes.fromShort(qualifier), value);
     // TODO(tsuna): Add a callback to time the latency of HBase and store the
     // timing in a moving Histogram (once we have a class for this).
     return client.put(point);
   }
+
+
+    /**
+     * Increments a single integer value data point in the TSDB.
+     * @param metric A non-empty string.
+     * @param timestamp The timestamp associated with the value.
+     * @param value The value of the data point.
+     * @param tags The tags on this series.  This map must be non-empty.
+     * @return A deferred object that indicates the completion of the request.
+     * The {@link Object} has not special meaning and can be {@code null} (think
+     * of it as {@code Deferred<Void>}). But you probably want to attach at
+     * least an errback to this {@code Deferred} to handle failures.
+     * @throws IllegalArgumentException if the timestamp is less than or equal
+     * to the previous timestamp added or 0 for the first timestamp, or if the
+     * difference with the previous timestamp is too large.
+     * @throws IllegalArgumentException if the metric name is empty or contains
+     * illegal characters.
+     * @throws IllegalArgumentException if the tags list is empty or one of the
+     * elements contains illegal characters.
+     * @throws HBaseException (deferred) if there was a problem while persisting
+     * data.
+     */
+    public Deferred<Object> incPoint(final String metric,
+                                     final long timestamp,
+                                     final long value,
+                                     final Map<String, String> tags) {
+        final short flags = 0x7;  // An int stored on 8 bytes.
+        return incPointInternal(metric, timestamp, value, tags, flags);
+    }
+
+    /**
+     * Incrementsw a single floating-point value data point in the TSDB.
+     * @param metric A non-empty string.
+     * @param timestamp The timestamp associated with the value.
+     * @param value The value of the data point.
+     * @param tags The tags on this series.  This map must be non-empty.
+     * @return A deferred object that indicates the completion of the request.
+     * The {@link Object} has not special meaning and can be {@code null} (think
+     * of it as {@code Deferred<Void>}). But you probably want to attach at
+     * least an errback to this {@code Deferred} to handle failures.
+     * @throws IllegalArgumentException if the timestamp is less than or equal
+     * to the previous timestamp added or 0 for the first timestamp, or if the
+     * difference with the previous timestamp is too large.
+     * @throws IllegalArgumentException if the metric name is empty or contains
+     * illegal characters.
+     * @throws IllegalArgumentException if the value is NaN or infinite.
+     * @throws IllegalArgumentException if the tags list is empty or one of the
+     * elements contains illegal characters.
+     * @throws HBaseException (deferred) if there was a problem while persisting
+     * data.
+     */
+    public Deferred<Object> incPoint(final String metric,
+                                     final long timestamp,
+                                     final float value,
+                                     final Map<String, String> tags) {
+        if (Float.isNaN(value) || Float.isInfinite(value)) {
+            throw new IllegalArgumentException("value is NaN or Infinite: " + value
+                    + " for metric=" + metric
+                    + " timestamp=" + timestamp);
+        }
+        final short flags = Const.FLAG_FLOAT | 0x3;  // A float stored on 4 bytes.
+        return incPointInternal(metric, timestamp, Float.floatToRawIntBits(value), tags, flags);
+    }
+
+
+    private Deferred<Object> incPointInternal(final String metric,
+                                              final long timestamp,
+                                              final long value,
+                                              final Map<String, String> tags,
+                                              final short flags) {
+        if ((timestamp & 0xFFFFFFFF00000000L) != 0) {
+            // => timestamp < 0 || timestamp > Integer.MAX_VALUE
+            throw new IllegalArgumentException((timestamp < 0 ? "negative " : "bad")
+                    + " timestamp=" + timestamp
+                    + " when trying to add value=" + value + '/' + flags
+                    + " to metric=" + metric + ", tags=" + tags);
+        }
+
+        IncomingDataPoints.checkMetricAndTags(metric, tags);
+        final byte[] row = IncomingDataPoints.rowKeyTemplate(this, metric, tags);
+        final long base_time = (timestamp - (timestamp % Const.MAX_TIMESPAN));
+        Bytes.setInt(row, (int) base_time, metrics.width());
+        scheduleForCompaction(row, (int) base_time);
+        final short qualifier = (short) ((timestamp - base_time) << Const.FLAG_BITS
+                | flags);
+        final AtomicIncrementRequest point = new AtomicIncrementRequest(table, row, FAMILY, Bytes.fromShort(qualifier), value);
+        // TODO(tsuna): Add a callback to time the latency of HBase and store the
+        // timing in a moving Histogram (once we have a class for this).
+        return client.atomicIncrement(true, point);
+    }
 
   /**
    * Forces a flush of any un-committed in memory data.
